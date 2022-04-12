@@ -68,10 +68,16 @@ public class SAMLMetadataMigrator extends Migrator {
     public static final String DO_VALIDATE_SIGNATURE_IN_REQUESTS = "doValidateSignatureInRequests";
     public static final String IDP_ENTITY_ID_ALIAS = "idpEntityIDAlias";
 
-    public static final String ADD_SAML_APP = "INSERT INTO IDN_SAML2_CONSUMER_APPS " +
-            "(ISSUER_NAME, PROP_KEY, PROP_VALUE, TENANT_ID) VALUES (?,?,?,?) ";
-    public static final String CHECK_SAML_APP_EXISTS_BY_ISSUER = "SELECT * FROM IDN_SAML2_CONSUMER_APPS WHERE " +
-            "ISSUER_NAME = ? AND TENANT_ID = ? LIMIT 1";
+    public static final String SAML2 = "samlsso";
+    public static final String STANDARD_APPLICATION = "standardAPP";
+
+    public static final String ADD_SAML_APP = "INSERT INTO SP_INBOUND_AUTH (TENANT_ID, INBOUND_AUTH_KEY," +
+            "INBOUND_AUTH_TYPE,PROP_NAME, PROP_VALUE, APP_ID,INBOUND_CONFIG_TYPE) VALUES (?,?,?,?,?,?,?)";
+    public static final String CHECK_SAML_APP_EXISTS_BY_ISSUER = "SELECT * FROM SP_INBOUND_AUTH WHERE " +
+            "INBOUND_AUTH_KEY = ? AND INBOUND_AUTH_TYPE = ? AND TENANT_ID = ? AND PROP_NAME != null LIMIT 1";
+    public static final String GET_SP_APP_ID_BY_ISSUER = "SELECT APP_ID FROM SP_INBOUND_AUTH WHERE " +
+            "INBOUND_AUTH_KEY = ? AND INBOUND_AUTH_TYPE = ? AND TENANT_ID = ? LIMIT 1";
+
 
     @Override
     public void dryRun() throws MigrationClientException {
@@ -110,7 +116,19 @@ public class SAMLMetadataMigrator extends Migrator {
 
     @Override
     public void migrate() throws MigrationClientException {
+        // Migrate super tenant
+        migratingSAMLMetadata(MultitenantConstants.SUPER_TENANT_DOMAIN_NAME.toString(), false);
 
+        // Migrate other tenants
+        Set<Tenant> tenants = Utility.getTenants();
+        for (Tenant tenant : tenants) {
+            if (isIgnoreForInactiveTenants() && !tenant.isActive()) {
+                log.info(Constant.MIGRATION_LOG + "Tenant " + tenant.getDomain() + " is inactive. SAML " +
+                        "metadata migration will be skipped. ");
+            } else {
+                migratingSAMLMetadata(tenant.getDomain(), false);
+            }
+        }
     }
 
     private void migratingSAMLMetadata(String tenantDomain, boolean isDryRun) throws MigrationClientException {
@@ -151,7 +169,7 @@ public class SAMLMetadataMigrator extends Migrator {
         }
         for(SAMLSSOServiceProviderDO samlssoServiceProviderDO : samlssoServiceProviders) {
             try {
-                addServiceProvider(samlssoServiceProviderDO, tenantId);
+                addServiceProvider(samlssoServiceProviderDO, tenantId ,isDryRun);
             } catch (IdentityException e) {
                 e.printStackTrace();
                 log.error(Constant.MIGRATION_LOG + "Error while persisting data to the database.", e);
@@ -335,10 +353,11 @@ public class SAMLMetadataMigrator extends Migrator {
      * Add the service provider information to the database.
      *
      * @param serviceProviderDO Service provider information object.
+     * @param isDryRun
      * @return True if addition successful.
      * @throws IdentityException Error while persisting to the database.
      */
-    public boolean addServiceProvider(SAMLSSOServiceProviderDO serviceProviderDO, int tenantId) throws IdentityException {
+    private boolean addServiceProvider(SAMLSSOServiceProviderDO serviceProviderDO, int tenantId, boolean isDryRun) throws IdentityException {
 
         if (serviceProviderDO == null || serviceProviderDO.getIssuer() == null ||
                 StringUtils.isBlank(serviceProviderDO.getIssuer())) {
@@ -368,19 +387,28 @@ public class SAMLMetadataMigrator extends Migrator {
         HashMap<String, LinkedHashSet<String>> pairMap = convertServiceProviderDOToMap(serviceProviderDO);
         String issuerName = serviceProviderDO.getIssuer();
 
+        int appId = getServiceProviderAppId(issuerName, tenantId);
+
         Connection connection = IdentityDatabaseUtil.getDBConnection(true);
 
         PreparedStatement prepStmt = null;
 
         try {
             prepStmt = connection.prepareStatement(ADD_SAML_APP);
-            prepStmt.setString(1, issuerName);
-            prepStmt.setInt(4, tenantId);
+            prepStmt.setInt(1, tenantId);
+            prepStmt.setString(2, issuerName);
+            prepStmt.setString(3,SAML2);
+            prepStmt.setInt(6, appId);
+            prepStmt.setString(7, STANDARD_APPLICATION);
             for (Map.Entry<String, LinkedHashSet<String>> entry : pairMap.entrySet()) {
                 for (String value : entry.getValue()) {
-                    prepStmt.setString(2, entry.getKey());
-                    prepStmt.setString(3, value);
+                    prepStmt.setString(4, entry.getKey());
+                    prepStmt.setString(5, value);
                     prepStmt.addBatch();
+                    if(isDryRun) {
+                        reportUtil.writeMessage(String.format("%40s | %40s | %40s | %40s ", issuerName,
+                                entry.getKey(), value, tenantId));
+                    }
                 }
             }
             prepStmt.executeBatch();
@@ -409,7 +437,7 @@ public class SAMLMetadataMigrator extends Migrator {
         return issuerWithQualifier;
     }
 
-    public boolean isServiceProviderExists(String issuer, int tenantId) throws IdentityException {
+    private boolean isServiceProviderExists(String issuer, int tenantId) throws IdentityException {
 
         PreparedStatement prepStmt = null;
         ResultSet results = null;
@@ -418,7 +446,8 @@ public class SAMLMetadataMigrator extends Migrator {
         try {
             prepStmt = connection.prepareStatement(CHECK_SAML_APP_EXISTS_BY_ISSUER);
             prepStmt.setString(1, issuer);
-            prepStmt.setInt(2, tenantId);
+            prepStmt.setString(2, SAML2);
+            prepStmt.setInt(3, tenantId);
             results = prepStmt.executeQuery();
             if (results.next()) {
                 return true;
@@ -431,6 +460,31 @@ public class SAMLMetadataMigrator extends Migrator {
             IdentityDatabaseUtil.closeAllConnections(connection, results, prepStmt);
         }
         return false;
+    }
+
+    private int getServiceProviderAppId(String issuer, int tenantId) throws IdentityException {
+
+        PreparedStatement prepStmt = null;
+        ResultSet results = null;
+        Connection connection = IdentityDatabaseUtil.getDBConnection(false);
+
+        try {
+            prepStmt = connection.prepareStatement(GET_SP_APP_ID_BY_ISSUER);
+            prepStmt.setString(1, issuer);
+            prepStmt.setString(2, SAML2);
+            prepStmt.setInt(3, tenantId);
+            results = prepStmt.executeQuery();
+            if (results.next()) {
+                return results.getInt(1);
+            }
+        } catch (SQLException e) {
+            String msg = "Error checking service provider from the database with issuer : " + issuer;
+            log.error(msg, e);
+            throw new IdentityException(msg, e);
+        } finally {
+            IdentityDatabaseUtil.closeAllConnections(connection, results, prepStmt);
+        }
+        return -1;
     }
 
     /**

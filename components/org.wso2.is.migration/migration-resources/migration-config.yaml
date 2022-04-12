@@ -540,3 +540,9 @@ versions:
      parameters:
        location: "step7"
        schema: "um"
+
+   - name: "SAMLMetadataMigrator"
+     order: 12
+     parameters:
+       location: "step7"
+       schema: "identity"
