@@ -18,6 +18,7 @@ import org.wso2.carbon.registry.core.Collection;
 import org.wso2.carbon.registry.core.Registry;
 import org.wso2.carbon.registry.core.Resource;
 import org.wso2.carbon.registry.core.exceptions.RegistryException;
+import org.wso2.carbon.registry.core.jdbc.utils.Transaction;
 import org.wso2.carbon.user.api.Tenant;
 
 import java.io.IOException;
@@ -94,7 +95,7 @@ public class SAMLMetadataMigrator extends Migrator {
 
             log.info(Constant.MIGRATION_LOG + "Started the dry run of SAML metadata migration.");
             // Migrate super tenant
-            migratingSAMLMetadata(MultitenantConstants.SUPER_TENANT_DOMAIN_NAME.toString(), true);
+            migratingSAMLMetadata(MultitenantConstants.SUPER_TENANT_DOMAIN_NAME, true);
 
             // Migrate other tenants
             Set<Tenant> tenants = Utility.getTenants();
@@ -117,7 +118,7 @@ public class SAMLMetadataMigrator extends Migrator {
     @Override
     public void migrate() throws MigrationClientException {
         // Migrate super tenant
-        migratingSAMLMetadata(MultitenantConstants.SUPER_TENANT_DOMAIN_NAME.toString(), false);
+        migratingSAMLMetadata(MultitenantConstants.SUPER_TENANT_DOMAIN_NAME, false);
 
         // Migrate other tenants
         Set<Tenant> tenants = Utility.getTenants();
@@ -142,6 +143,7 @@ public class SAMLMetadataMigrator extends Migrator {
         SAMLSSOServiceProviderDO[] samlssoServiceProviders = null;
 
         int tenantId;
+        Registry registry;
         if (StringUtils.isEmpty(tenantDomain)) {
             if (log.isDebugEnabled()) {
                 log.debug("Tenant domain is not available. Hence using super tenant domain");
@@ -154,8 +156,11 @@ public class SAMLMetadataMigrator extends Migrator {
 
         try {
             IdentityTenantUtil.initializeRegistry(tenantId, tenantDomain);
-            Registry registry = IdentityTenantUtil.getConfigRegistry(tenantId);
+            registry = IdentityTenantUtil.getConfigRegistry(tenantId);
             samlssoServiceProviders = getServiceProviders(registry);
+            if(!isDryRun) {
+                removeAllServiceProvidersFromRegistry(registry,tenantId);
+            }
         } catch (RegistryException e) {
             log.error(Constant.MIGRATION_LOG + "Error while getting data from the registry.", e);
         } catch (IdentityException e) {
@@ -174,6 +179,51 @@ public class SAMLMetadataMigrator extends Migrator {
                 e.printStackTrace();
                 log.error(Constant.MIGRATION_LOG + "Error while persisting data to the database.", e);
             }
+        }
+    }
+
+    private void removeAllServiceProvidersFromRegistry(Registry registry , int tenantId) throws IdentityException {
+        String path = IdentityRegistryResources.SAML_SSO_SERVICE_PROVIDERS;
+        boolean isTransactionStarted = Transaction.isStarted();
+        boolean isErrorOccurred = false;
+        try {
+            if (!registry.resourceExists(path)) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Registry resource does not exist for the path: " + path);
+                }
+                return;
+            }
+            if (!isTransactionStarted) {
+                registry.beginTransaction();
+            }
+            registry.delete(path);
+            return;
+        } catch (RegistryException e) {
+            isErrorOccurred = true;
+            String msg = "Error removing the service providers with tenantId : "+tenantId;
+            log.error(msg, e);
+            throw IdentityException.error(msg, e);
+        } finally {
+            commitOrRollbackTransaction(registry, isErrorOccurred);
+        }
+    }
+
+    /**
+     * Commit or rollback the registry operation depends on the error condition.
+     * @param isErrorOccurred Identifier for error transactions.
+     * @throws IdentityException Error while committing or running rollback on the transaction.
+     */
+    private void commitOrRollbackTransaction(Registry registry, boolean isErrorOccurred) throws IdentityException {
+
+        try {
+            // Rollback the transaction if there is an error, Otherwise try to commit.
+            if (isErrorOccurred) {
+                registry.rollbackTransaction();
+            } else {
+                registry.commitTransaction();
+            }
+        } catch (RegistryException ex) {
+            throw new IdentityException("Error occurred while trying to commit or rollback the registry operation.", ex);
         }
     }
 
@@ -402,12 +452,14 @@ public class SAMLMetadataMigrator extends Migrator {
             prepStmt.setString(7, STANDARD_APPLICATION);
             for (Map.Entry<String, LinkedHashSet<String>> entry : pairMap.entrySet()) {
                 for (String value : entry.getValue()) {
-                    prepStmt.setString(4, entry.getKey());
-                    prepStmt.setString(5, value);
-                    prepStmt.addBatch();
                     if(isDryRun) {
                         reportUtil.writeMessage(String.format("%40s | %40s | %40s | %40s ", issuerName,
                                 entry.getKey(), value, tenantId));
+                    }
+                    else {
+                        prepStmt.setString(4, entry.getKey());
+                        prepStmt.setString(5, value);
+                        prepStmt.addBatch();
                     }
                 }
             }
