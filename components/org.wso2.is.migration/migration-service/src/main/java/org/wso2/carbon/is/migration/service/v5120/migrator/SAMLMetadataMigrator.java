@@ -77,7 +77,7 @@ public class SAMLMetadataMigrator extends Migrator {
     public static final String CHECK_SAML_APP_EXISTS_BY_ISSUER = "SELECT * FROM SP_INBOUND_AUTH WHERE " +
             "INBOUND_AUTH_KEY = ? AND INBOUND_AUTH_TYPE = ? AND TENANT_ID = ? AND PROP_NAME != null LIMIT 1";
     public static final String GET_SP_APP_ID_BY_ISSUER = "SELECT APP_ID FROM SP_INBOUND_AUTH WHERE " +
-            "INBOUND_AUTH_KEY = ? AND INBOUND_AUTH_TYPE = ? AND TENANT_ID = ? LIMIT 1";
+            "INBOUND_AUTH_KEY = ? AND TENANT_ID = ? AND INBOUND_AUTH_TYPE = ?";
 
 
     @Override
@@ -468,7 +468,7 @@ public class SAMLMetadataMigrator extends Migrator {
         } catch (SQLException e) {
             IdentityDatabaseUtil.rollbackTransaction(connection);
             String msg = "Error adding new service provider to the database with issuer" +
-                    serviceProviderDO.getIssuer();
+                    serviceProviderDO.getIssuer() + " , and AppID = "+appId+", and prepareStatement = "+prepStmt.toString();
             log.error(msg, e);
             throw new IdentityException(msg, e);
         } finally {
@@ -519,24 +519,26 @@ public class SAMLMetadataMigrator extends Migrator {
         PreparedStatement prepStmt = null;
         ResultSet results = null;
         Connection connection = IdentityDatabaseUtil.getDBConnection(false);
-
+        String resultsMsg = null;
         try {
             prepStmt = connection.prepareStatement(GET_SP_APP_ID_BY_ISSUER);
             prepStmt.setString(1, issuer);
-            prepStmt.setString(2, SAML2);
-            prepStmt.setInt(3, tenantId);
+            prepStmt.setInt(2, tenantId);
+            prepStmt.setString(3, SAML2);
             results = prepStmt.executeQuery();
             if (results.next()) {
+                String msg = "My Results = "+ results.toString();
+                log.error(msg);
                 return results.getInt(1);
             }
         } catch (SQLException e) {
-            String msg = "Error checking service provider from the database with issuer : " + issuer;
-            log.error(msg, e);
+            String msg = "Error checking service provider from the database with issuer : " + issuer +
+                    " , prepareStatement = "+prepStmt.toString()+" results = "+((resultsMsg == null)?"null":resultsMsg);
             throw new IdentityException(msg, e);
         } finally {
             IdentityDatabaseUtil.closeAllConnections(connection, results, prepStmt);
         }
-        return -1;
+        return -99999;
     }
 
     /**
