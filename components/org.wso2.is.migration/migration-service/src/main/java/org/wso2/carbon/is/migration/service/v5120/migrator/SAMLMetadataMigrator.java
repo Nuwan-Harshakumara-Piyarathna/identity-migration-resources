@@ -110,8 +110,6 @@ public class SAMLMetadataMigrator extends Migrator {
             log.info(Constant.MIGRATION_LOG + "Started migrating SAML metadata for tenant: " + tenantDomain);
         }
 
-        SAMLSSOServiceProviderDO[] samlssoServiceProviders = null;
-
         int tenantId;
         Registry registry;
         if (StringUtils.isEmpty(tenantDomain)) {
@@ -125,7 +123,7 @@ public class SAMLMetadataMigrator extends Migrator {
         }
 
         try {
-            IdentityTenantUtil.initializeRegistry(tenantId, tenantDomain);
+            IdentityTenantUtil.initializeRegistry(tenantId);
             registry = IdentityTenantUtil.getConfigRegistry(tenantId);
             moveServiceProvidersToRegistry(registry, tenantId, isDryRun, tenantDomain);
             if (!isDryRun) {
@@ -513,7 +511,6 @@ public class SAMLMetadataMigrator extends Migrator {
         PreparedStatement prepStmt = null;
         ResultSet results = null;
         Connection connection = IdentityDatabaseUtil.getDBConnection(false);
-        String resultsMsg = null;
         try {
             prepStmt = connection.prepareStatement(GET_SP_APP_ID_BY_ISSUER);
             prepStmt.setString(1, issuer);
@@ -549,6 +546,9 @@ public class SAMLMetadataMigrator extends Migrator {
 
     private void addKeyValuePair(PreparedStatement prepStmt, String key, String value, String issuerName, int tenantId,
                                  boolean isDryRun) throws SQLException {
+        if(value == null) {
+            return;
+        }
         if (isDryRun) {
             reportUtil.writeMessage(String.format("%40s | %40s | %40s | %40s ", issuerName,
                     key, value, tenantId));
